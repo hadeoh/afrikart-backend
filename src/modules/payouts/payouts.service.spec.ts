@@ -1,6 +1,7 @@
 import { Test } from '@nestjs/testing';
 import { getModelToken } from '@nestjs/mongoose';
 import { ConfigService } from '@nestjs/config';
+import { UnprocessableEntityException } from '@nestjs/common';
 import { PayoutsService } from './payouts.service';
 import { Payout } from './schemas/payout.schema';
 import { AfrikartService } from '../afrikart/afrikart.service';
@@ -418,5 +419,34 @@ describe('PayoutsService — uncertainty recovery (onModuleInit)', () => {
     await service.onModuleDestroy();
 
     expect(store.get('po-already-settled').status).toBe('successful');
+  });
+});
+
+// ─── Test: INSUFFICIENT_FUNDS rejected at submission ─────────────────────────
+
+describe('PayoutsService — INSUFFICIENT_FUNDS', () => {
+  it('transitions to failed, throws 422, and does not set walletCreditAt', async () => {
+    const { service, store } = await buildService({
+      verifyAccountNumber: jest.fn().mockResolvedValue({
+        data: { resolved: true, accountName: 'Ada Lovelace' },
+      }),
+      createPayout: jest.fn().mockRejectedValue(
+        new AfrikartApiError('Insufficient balance', 422, 'INSUFFICIENT_FUNDS'),
+      ),
+    });
+
+    await expect(
+      service.createPayout({
+        customerReference: 'po-insuf-001',
+        amount: 999_999,
+        recipient: { name: 'Ada Lovelace', accountNumber: '0123456789', bankCode: '058' },
+      }),
+    ).rejects.toThrow(UnprocessableEntityException);
+
+    const payout = store.get('po-insuf-001');
+    expect(payout.status).toBe('failed');
+    expect(payout.failureReason).toBe('Insufficient balance');
+    // No funds were ever sent — no wallet credit to reconcile
+    expect(payout.walletCreditAt ?? null).toBeNull();
   });
 });

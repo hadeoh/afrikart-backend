@@ -4,6 +4,7 @@ import {
   NotFoundException,
   OnModuleDestroy,
   OnModuleInit,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -323,9 +324,25 @@ export class PayoutsService implements OnModuleInit, OnModuleDestroy {
         $inc: { attemptCount: 1 },
       });
     } catch (err) {
-      // Submission failed — payout stays PROCESSING. If the request actually
-      // reached the provider, their webhook will settle it. If not, the
-      // uncertainty recovery scan will mark it UNCERTAIN after the threshold.
+      // Deterministic provider rejection — the request was definitively refused,
+      // no funds moved, no webhook will ever arrive.
+      if (err instanceof AfrikartApiError && err.errorType === 'INSUFFICIENT_FUNDS') {
+        this.logger.warn(
+          `Payout ${payout.customerReference} rejected: insufficient balance`,
+        );
+        await this.transition(payout, 'failed', 'system', {
+          reason: 'Insufficient balance',
+          errorType: err.errorType,
+        });
+        throw new UnprocessableEntityException({
+          error: 'Insufficient balance',
+          errorType: 'INSUFFICIENT_FUNDS',
+        });
+      }
+
+      // Transient or unknown error — the request may or may not have reached
+      // the provider. Leave in PROCESSING; the recovery scan will mark it
+      // UNCERTAIN if no webhook arrives within the threshold.
       this.logger.error(
         `Payout submission failed for ${payout.customerReference}: ${err instanceof Error ? err.message : String(err)}`,
       );
