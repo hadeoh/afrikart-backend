@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, Post } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
 import { CollectionsService } from './collections.service';
 import { InitiateCheckoutDto } from './dto/initiate-checkout.dto';
@@ -28,5 +28,19 @@ export class CollectionsController {
   async getTransaction(@Param('ref') ref: string) {
     const txn = await this.service.getByRef(ref);
     return { success: true, data: txn };
+  }
+
+  @Post(':ref/sync')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Sync collection status from provider',
+    description: 'Polls the provider for the current payment status and applies it locally. No-op if the transaction is already settled. Use when a webhook was expected but never arrived.',
+  })
+  @ApiParam({ name: 'ref', description: 'The internalRef of the collection to sync' })
+  @ApiResponse({ status: 200, description: 'synced:true if status was updated, synced:false if already settled or provider still pending' })
+  @ApiResponse({ status: 404, description: 'Transaction not found' })
+  async syncStatus(@Param('ref') ref: string) {
+    const result = await this.service.syncCollectionStatus(ref);
+    return { success: true, ...result };
   }
 }

@@ -97,6 +97,34 @@ export class CollectionsService {
     return txn;
   }
 
+  async syncCollectionStatus(internalRef: string): Promise<{ synced: boolean; data: any }> {
+    const txn = await this.txnModel.findOne({ internalRef }).lean() as any;
+    if (!txn) throw new NotFoundException(`Transaction ${internalRef} not found`);
+
+    if (txn.status !== 'pending') {
+      return { synced: false, data: txn };
+    }
+
+    const providerRes: any = await this.afrikart.getPaymentByReference(internalRef);
+    const payment = providerRes?.data ?? providerRes;
+    const providerStatus: string = payment?.status;
+
+    if (providerStatus !== 'successful' && providerStatus !== 'failed') {
+      return { synced: false, data: txn };
+    }
+
+    await this.applyCollectionWebhook(internalRef, providerStatus, {
+      id: payment.id,
+      paymentSource: payment.channel ?? null,
+      fee: payment.fee ?? null,
+      vat: payment.vat ?? null,
+    });
+
+    this.logger.log(`Collection ${internalRef} synced from provider: ${providerStatus}`);
+    const updated = await this.txnModel.findOne({ internalRef }).lean();
+    return { synced: true, data: updated };
+  }
+
   async applyCollectionWebhook(
     internalRef: string,
     status: 'successful' | 'failed',

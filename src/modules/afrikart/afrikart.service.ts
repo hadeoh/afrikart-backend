@@ -73,6 +73,12 @@ export class AfrikartService implements OnModuleInit {
     return this.callWithRetry(() => this.publicHttp.post('/checkout/initiate', dto));
   }
 
+  async getPaymentByReference(reference: string) {
+    return this.callWithRetry(() =>
+      this.secretHttp.get(`/checkout/payments/${reference}`),
+    );
+  }
+
   // ─── Virtual accounts ─────────────────────────────────────────────────────
 
   async createVirtualAccount(dto: {
