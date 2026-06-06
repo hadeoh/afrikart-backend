@@ -17,38 +17,55 @@ export class CollectionsService {
 
   constructor(
     @InjectModel(Transaction.name) private readonly txnModel: Model<TransactionDocument>,
-    private readonly fincra: AfrikartService,
+    private readonly afrikart: AfrikartService,
   ) {}
+
+  private async guardOrderId(orderId: string | undefined) {
+    if (!orderId) return;
+    const conflict = await this.txnModel.findOne({ orderId }).lean();
+    if (conflict) {
+      throw new ConflictException(
+        `Order "${orderId}" already has an active payment. Cancel it before opening a new one.`,
+      );
+    }
+  }
 
   async initiateCheckout(dto: InitiateCheckoutDto) {
     const internalRef = dto.reference ?? generateRef('ord');
 
-    // UI double-submit guard: check before calling API 
-    const existing = await this.txnModel.findOne({ internalRef }).lean();
+    await this.guardOrderId(dto.orderId);
+
+    const existing = await this.txnModel.findOne({ internalRef }).lean() as any;
     if (existing) {
-      throw new ConflictException(
-        `A transaction with reference "${internalRef}" already exists`,
-      );
+      this.logger.log(`Checkout idempotent hit: ${internalRef}`);
+      return {
+        idempotent: true,
+        collectionMethod: 'checkout' as const,
+        internalRef: existing.internalRef,
+        checkoutUrl: existing.checkoutUrl ?? null,
+        status: existing.status,
+        externalPaymentId: existing.externalPaymentId ?? null,
+      };
     }
 
-    // Call sandbox — subject to chaos-mode 503; service retries up to 3x
-    const fincraRes: any = await this.fincra.initiateCheckout({
+    const afrikartRes: any = await this.afrikart.initiateCheckout({
       ...dto,
       reference: internalRef,
     });
 
-    const payment = fincraRes.data?.payment ?? {};
+    const payment = afrikartRes.data?.payment ?? {};
 
-    // Persist immediately so the timeline starts at the right moment
     const txn = await this.txnModel.create({
       internalRef,
+      orderId: dto.orderId ?? null,
+      collectionMethod: 'checkout',
       externalPaymentId: payment.id ?? null,
       amount: dto.amount,
       currency: dto.currency ?? 'NGN',
       customer: dto.customer,
       metadata: dto.metadata ?? {},
       status: 'pending',
-      checkoutUrl: fincraRes.data?.checkoutUrl ?? null,
+      checkoutUrl: afrikartRes.data?.checkoutUrl ?? null,
       timeline: [
         {
           at: new Date(),
@@ -65,10 +82,12 @@ export class CollectionsService {
 
     this.logger.log(`Checkout initiated: ${internalRef}`);
     return {
+      idempotent: false,
+      collectionMethod: 'checkout' as const,
       internalRef: txn.internalRef,
       checkoutUrl: txn.checkoutUrl,
       status: txn.status,
-      fincraPaymentId: txn.externalPaymentId,
+      externalPaymentId: txn.externalPaymentId ?? null,
     };
   }
 
@@ -78,7 +97,6 @@ export class CollectionsService {
     return txn;
   }
 
-  // Called by WebhooksService when a collection webhook arrives
   async applyCollectionWebhook(
     internalRef: string,
     status: 'successful' | 'failed',
@@ -86,14 +104,13 @@ export class CollectionsService {
   ) {
     const newStatus = status === 'successful' ? 'successful' : 'failed';
     const update = await this.txnModel.findOneAndUpdate(
-      { internalRef, status: 'pending' }, // only advance from pending
+      { internalRef, status: 'pending' },
       {
         $set: {
           status: newStatus,
           channel: webhookData.paymentSource as string ?? null,
           feeAmount: webhookData.fee as number ?? null,
           vatAmount: webhookData.vat as number ?? null,
-          // Backfill fincraPaymentId if somehow missing from checkout response
           ...(webhookData.id ? { externalPaymentId: webhookData.id } : {}),
         },
         $push: {
@@ -109,13 +126,11 @@ export class CollectionsService {
     );
 
     if (!update) {
-      // Transaction either doesn't exist or has already been settled — both
-      // are fine: duplicate webhooks will hit this branch and be discarded.
       this.logger.warn(
         `Collection webhook for ${internalRef} had no effect (already settled or not found)`,
       );
     } else {
-      this.logger.log(`Collection ${internalRef} → ${newStatus}`);
+      this.logger.log(`Collection ${internalRef} -> ${newStatus}`);
     }
   }
 }

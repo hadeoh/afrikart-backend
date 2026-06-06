@@ -13,9 +13,6 @@ export class TimelineService {
     private readonly afrikart: AfrikartService,
   ) {}
 
-  // ─── Full transaction lifecycle ───────────────────────────────────────────
-  // Returns one chronological view that answers "what happened to order X?"
-  // without reading app logs. Includes all linked payouts.
   async getTransactionTimeline(internalRef: string) {
     const txn = await this.txnModel.findOne({ internalRef }).lean();
     if (!txn) throw new NotFoundException(`Transaction ${internalRef} not found`);
@@ -60,7 +57,6 @@ export class TimelineService {
     };
   }
 
-  // ─── Payout lifecycle only ────────────────────────────────────────────────
   async getPayoutTimeline(customerReference: string) {
     const payout = await this.payoutModel.findOne({ customerReference }).lean();
     if (!payout) throw new NotFoundException(`Payout ${customerReference} not found`);
@@ -72,7 +68,8 @@ export class TimelineService {
         providerPayoutId: payout.providerPayoutId,
         amount: payout.amount,
         status: payout.status,
-        failureReason: payout.failureReason,
+        failureReason: payout.failureReason ?? null,
+        walletCreditAt: (payout as any).walletCreditAt ?? null,
         recipient: payout.recipient,
         attemptCount: payout.attemptCount,
       },
@@ -82,13 +79,11 @@ export class TimelineService {
     };
   }
 
-  // ─── Provider event log (Fincra's side) ──────────────────────────────────
   async getProviderEvents(eventType?: string, limit = 50) {
     const res: any = await this.afrikart.getEvents(eventType, limit);
     return res?.data ?? res;
   }
 
-  // ─── Wallet movement log (Fincra's side) ─────────────────────────────────
   async getWalletLogs(currency?: string, type?: string, page = 1, limit = 20) {
     const res: any = await this.afrikart.getWalletLogs(currency, type, page, limit);
     return res?.data ?? res;

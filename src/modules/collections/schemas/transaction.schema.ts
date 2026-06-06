@@ -24,8 +24,26 @@ export class Transaction {
   @Prop({ required: true, unique: true, index: true })
   internalRef: string;
 
+
+  @Prop({ default: null, index: { unique: true, sparse: true } })
+  orderId: string | null;
+
+  @Prop({ required: true, enum: ['checkout', 'virtual_account'], default: 'checkout' })
+  collectionMethod: string;
+
   @Prop({ default: null })
   externalPaymentId: string;
+
+  @Prop({ type: Object, default: null })
+  virtualAccountInfo: {
+    id: string;
+    accountNumber: string;
+    accountName: string;
+    bankName: string;
+    bankCode: string;
+    status: string;      // pending → approved
+    expiresAt: string;
+  } | null;
 
   @Prop({ required: true })
   amount: number;
@@ -54,7 +72,6 @@ export class Transaction {
   @Prop({ default: null })
   checkoutUrl: string;
 
-  // Append-only timeline; never overwritten
   @Prop({ type: [Object], default: [] })
   timeline: TransactionEvent[];
 }

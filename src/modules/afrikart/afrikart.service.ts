@@ -35,19 +35,6 @@ export interface VerifyAccountDto {
   bankCode: string;
 }
 
-export interface QuoteDto {
-  sourceCurrency: string;
-  destinationCurrency: string;
-  amount: number;
-  action?: string;
-}
-
-export interface SettleCollectionDto {
-  reference: string;
-  status?: string;
-  channel?: string;
-}
-
 @Injectable()
 export class AfrikartService implements OnModuleInit {
   private readonly logger = new Logger(AfrikartService.name);
@@ -86,6 +73,26 @@ export class AfrikartService implements OnModuleInit {
     return this.callWithRetry(() => this.publicHttp.post('/checkout/initiate', dto));
   }
 
+  // ─── Virtual accounts ─────────────────────────────────────────────────────
+
+  async createVirtualAccount(dto: {
+    reference: string;
+    currency?: string;
+    isPermanent?: boolean;
+    expiresInMinutes?: number;
+    customer: { name: string; email: string; bvn?: string };
+  }) {
+    return this.callWithRetry(() =>
+      this.secretHttp.post('/profile/virtual-accounts/requests', dto),
+    );
+  }
+
+  async getVirtualAccount(virtualAccountId: string) {
+    return this.callWithRetry(() =>
+      this.secretHttp.get(`/profile/virtual-accounts/${virtualAccountId}`),
+    );
+  }
+
   // ─── Identity ─────────────────────────────────────────────────────────────
 
   async verifyAccountNumber(dto: VerifyAccountDto) {
@@ -119,25 +126,6 @@ export class AfrikartService implements OnModuleInit {
   async getEvents(event?: string, limit = 50) {
     return this.callWithRetry(() =>
       this.secretHttp.get('/events', { params: { event, limit } }),
-    );
-  }
-
-  // ─── Simulation helpers (sandbox only) ────────────────────────────────────
-
-  async settleCollection(dto: SettleCollectionDto) {
-    // No auth required on simulate endpoints
-    return this.callWithRetry(() =>
-      axios.post(
-        `${this.config.get<string>('afrikart.baseUrl')}/simulate/collections/settle`,
-        dto,
-        { headers: { 'content-type': 'application/json' }, timeout: 10_000 },
-      ),
-    );
-  }
-
-  async replayWebhook(eventId: string) {
-    return this.callWithRetry(() =>
-      this.secretHttp.post(`/simulate/webhooks/replay/${eventId}`),
     );
   }
 

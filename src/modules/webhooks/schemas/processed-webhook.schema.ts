@@ -5,13 +5,14 @@ export type ProcessedWebhookDocument = HydratedDocument<ProcessedWebhook>;
 
 @Schema({ collection: 'processed_webhooks' })
 export class ProcessedWebhook {
-  // Fincra's event ID (evt_...) — unique index is the idempotency lock.
-  // A duplicate-key error on insert means we've already processed this event.
   @Prop({ required: true, unique: true, index: true })
-  fincraEventId: string;
+  eventId: string;
 
   @Prop({ required: true })
   eventType: string;
+
+  @Prop({ default: null })
+  externalPaymentId: string | null;
 
   @Prop({ required: true, default: () => new Date() })
   processedAt: Date;

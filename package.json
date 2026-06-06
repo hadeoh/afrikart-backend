@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "build": "npx nest build",
-    "start": "node dist/main",
+    "start": "npx nest start",
     "start:dev": "npx nest start --watch",
     "start:prod": "node dist/main",
     "test": "npx jest --runInBand --forceExit",
@@ -17,6 +17,7 @@
     "@nestjs/core": "^10.4.15",
     "@nestjs/mongoose": "^10.1.0",
     "@nestjs/platform-express": "^10.4.15",
+    "@nestjs/swagger": "^7.4.2",
     "axios": "^1.7.9",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
@@ -38,13 +39,22 @@
     "typescript": "^5.7.3"
   },
   "jest": {
-    "moduleFileExtensions": ["js", "json", "ts"],
+    "moduleFileExtensions": [
+      "js",
+      "json",
+      "ts"
+    ],
     "rootDir": ".",
-    "testMatch": ["**/*.spec.ts", "**/*.e2e-spec.ts"],
+    "testMatch": [
+      "**/*.spec.ts",
+      "**/*.e2e-spec.ts"
+    ],
     "transform": {
       "^.+\\.(t|j)s$": "ts-jest"
     },
-    "collectCoverageFrom": ["src/**/*.ts"],
+    "collectCoverageFrom": [
+      "src/**/*.ts"
+    ],
     "coverageDirectory": "coverage",
     "testEnvironment": "node",
     "moduleNameMapper": {

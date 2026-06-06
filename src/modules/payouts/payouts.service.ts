@@ -1,9 +1,9 @@
 import {
   Injectable,
   Logger,
-  ConflictException,
-  BadRequestException,
   NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -13,34 +13,59 @@ import { AfrikartService } from '../afrikart/afrikart.service';
 import { AfrikartApiError } from '../../common/utils/retry.util';
 import { CreatePayoutDto } from './dto/create-payout.dto';
 
-// ─── Valid state transitions ─────────────────────────────────────────────────
-// Enforced in transition() so no code path can move state backward or skip steps.
+// ─── State machine ────────────────────────────────────────────────────────────
+// ALLOWED_TRANSITIONS: what states a given state may advance TO.
 const ALLOWED_TRANSITIONS: Record<PayoutStatus, PayoutStatus[]> = {
   verification_pending: ['verification_failed', 'processing'],
   verification_failed: [],
   processing: ['successful', 'failed', 'uncertain'],
   successful: [],
   failed: [],
-  uncertain: ['successful', 'failed'], // ops can manually re-check and resolve
+  uncertain: ['successful', 'failed'],
+};
+
+// ALLOWED_FROM: which states may precede a given target state.
+// Derived by inverting ALLOWED_TRANSITIONS — used to build atomic DB filters
+// so concurrent writes can't move state backward or skip steps.
+const ALLOWED_FROM: Record<PayoutStatus, PayoutStatus[]> = {
+  verification_pending: [],
+  verification_failed: ['verification_pending'],
+  processing: ['verification_pending'],
+  successful: ['processing', 'uncertain'],
+  failed: ['processing', 'uncertain'],
+  uncertain: ['processing'],
 };
 
 @Injectable()
-export class PayoutsService {
+export class PayoutsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PayoutsService.name);
   private readonly uncertaintyThresholdMs: number;
+  private recoveryIntervalHandle: NodeJS.Timeout;
 
   constructor(
     @InjectModel(Payout.name) private readonly payoutModel: Model<PayoutDocument>,
-    private readonly fincra: AfrikartService,
+    private readonly afrikart: AfrikartService,
     private readonly config: ConfigService,
   ) {
     this.uncertaintyThresholdMs = this.config.get<number>('payoutUncertaintyThresholdMs');
   }
 
-  // ─── Create (idempotent) ──────────────────────────────────────────────────
+  // ─── Lifecycle ────────────────────────────────────────────────────────────
+  // On startup: immediately recover any payouts that were stuck in PROCESSING
+  // before the last restart, then keep a 30s poll running for new ones.
+  async onModuleInit() {
+    await this.recoverUncertainPayouts();
+    this.recoveryIntervalHandle = setInterval(
+      () => this.recoverUncertainPayouts(),
+      30_000,
+    );
+  }
+
+  async onModuleDestroy() {
+    clearInterval(this.recoveryIntervalHandle);
+  }
+
   async createPayout(dto: CreatePayoutDto): Promise<PayoutDocument> {
-    // (b) Idempotency: if a payout with this customerReference already exists,
-    // return it — no second API call to Fincra.
     const existing = await this.payoutModel.findOne({
       customerReference: dto.customerReference,
     });
@@ -49,12 +74,10 @@ export class PayoutsService {
       return existing;
     }
 
-    // 1. Verify destination account before touching any funds
-    let verifiedName: string | null = null;
     const payout = await this.payoutModel.create({
       customerReference: dto.customerReference,
-      idempotencyKey: dto.customerReference, // same key → Fincra also dedupes
       sourceTransactionRef: dto.sourceTransactionRef ?? null,
+      provider: dto.provider ?? 'afrikart',
       amount: dto.amount,
       sourceCurrency: dto.sourceCurrency ?? 'NGN',
       destinationCurrency: dto.destinationCurrency ?? dto.sourceCurrency ?? 'NGN',
@@ -73,8 +96,9 @@ export class PayoutsService {
       ],
     });
 
+    let verifiedName: string | null = null;
     try {
-      const verifyRes: any = await this.fincra.verifyAccountNumber({
+      const verifyRes: any = await this.afrikart.verifyAccountNumber({
         accountNumber: dto.recipient.accountNumber,
         bankCode: dto.recipient.bankCode,
       });
@@ -88,14 +112,12 @@ export class PayoutsService {
         });
       }
 
-      // Name mismatch check — warn but do not block (name formatting varies)
       const recipientNorm = dto.recipient.name.toLowerCase().replace(/\s+/g, '');
       const verifiedNorm = verifiedName.toLowerCase().replace(/\s+/g, '');
       if (!verifiedNorm.includes(recipientNorm) && !recipientNorm.includes(verifiedNorm)) {
         this.logger.warn(
           `Name mismatch on ${dto.customerReference}: expected "${dto.recipient.name}", got "${verifiedName}"`,
         );
-        // Treat as verification failure — safe outcome: no funds move
         return this.transition(payout, 'verification_failed', 'system', {
           reason: `Name mismatch: expected "${dto.recipient.name}", resolved "${verifiedName}"`,
           verifiedName,
@@ -107,13 +129,11 @@ export class PayoutsService {
           reason: 'Account not found (404)',
         });
       }
-      // Unexpected error during verification — fail safely
       return this.transition(payout, 'verification_failed', 'system', {
         reason: `Verification error: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
 
-    // 2. Account verified — update recipient with resolved name and advance state
     await this.payoutModel.findByIdAndUpdate(payout._id, {
       $set: { 'recipient.verifiedName': verifiedName },
     });
@@ -122,132 +142,119 @@ export class PayoutsService {
       verifiedName,
     });
 
-    // 3. Submit to Fincra
-    await this.submitToFincra(afterVerify, dto);
-
-    // 4. Schedule uncertainty check
-    this.scheduleUncertaintyCheck(afterVerify._id.toString());
+    await this.submitToProvider(afterVerify, dto);
 
     return this.payoutModel.findById(afterVerify._id);
   }
 
-  private async submitToFincra(payout: PayoutDocument, dto: CreatePayoutDto) {
-    try {
-      const res: any = await this.fincra.createPayout(
-        {
-          amount: dto.amount,
-          sourceCurrency: dto.sourceCurrency ?? 'NGN',
-          destinationCurrency: dto.destinationCurrency ?? dto.sourceCurrency ?? 'NGN',
-          customerReference: dto.customerReference,
-          narration: dto.narration ?? 'Afrikart payout',
-          quoteReference: dto.quoteReference,
-          recipient: dto.recipient,
-        },
-        payout.idempotencyKey,
-      );
-
-      const payoutData = res?.data ?? res;
-      await this.payoutModel.findByIdAndUpdate(payout._id, {
-        $set: {
-          providerPayoutReference: payoutData?.reference ?? null,
-          providerPayoutId: payoutData?.id ?? null,
-          fee: payoutData?.fee ?? null,
-          rate: payoutData?.rate ?? null,
-        },
-        $push: {
-          timeline: {
-            at: new Date(),
-            from: 'processing',
-            to: 'processing',
-            actor: 'system',
-            detail: {
-              note: 'Submitted to provider',
-              providerRef: payoutData?.reference,
-              providerId: payoutData?.id,
-            },
-          },
-        },
-        $inc: { attemptCount: 1 },
-      });
-    } catch (err) {
-      // Chaos or network failure during submission — payout stays PROCESSING.
-      // Idempotency key means a retry will return the cached result from Fincra
-      // if it went through. If it didn't, the webhook never arrives and the
-      // uncertainty timer fires.
-      this.logger.error(
-        `Payout submission failed for ${payout.customerReference}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      await this.payoutModel.findByIdAndUpdate(payout._id, {
-        $push: {
-          timeline: {
-            at: new Date(),
-            from: 'processing',
-            to: 'processing',
-            actor: 'system',
-            detail: {
-              note: 'Provider submission error — webhook will confirm or uncertainty timer will fire',
-              error: err instanceof Error ? err.message : String(err),
-            },
-          },
-        },
-        $inc: { attemptCount: 1 },
-      });
-    }
+  async getByCustomerRef(customerReference: string): Promise<PayoutDocument> {
+    const p = await this.payoutModel.findOne({ customerReference });
+    if (!p) throw new NotFoundException(`Payout ${customerReference} not found`);
+    return p;
   }
 
-  // ─── Webhook handler (called by WebhooksService) ─────────────────────────
+  async list(status?: string): Promise<any[]> {
+    const filter = status ? { status } : {};
+    return this.payoutModel.find(filter).sort({ createdAt: -1 }).lean();
+  }
+
+  // ─── Webhook handler (called by WebhooksService) ──────────────────────────
+  // Uses findOneAndUpdate with the status filter as an atomic guard — if a
+  // concurrent delivery already advanced state, the update matches nothing
+  // and we log a warning rather than moving state backward.
   async applyPayoutWebhook(
     customerReference: string,
     status: 'successful' | 'failed',
     data: Record<string, unknown>,
   ) {
-    const payout = await this.payoutModel.findOne({ customerReference });
-    if (!payout) {
-      this.logger.warn(`Payout webhook for unknown customerReference: ${customerReference}`);
-      return;
-    }
-
     const targetStatus: PayoutStatus = status === 'successful' ? 'successful' : 'failed';
-    const allowed = ALLOWED_TRANSITIONS[payout.status] ?? [];
+    const allowedFrom = ALLOWED_FROM[targetStatus]; 
 
-    if (!allowed.includes(targetStatus)) {
-      // Already in a terminal state — idempotent, ignore
+    const updated = await this.payoutModel.findOneAndUpdate(
+      { customerReference, status: { $in: allowedFrom } },
+      {
+        $set: {
+          status: targetStatus,
+          ...(targetStatus === 'failed'
+            ? {
+                failureReason: (data.reason as string) ?? 'Payout failed',
+                // Funds were submitted before the webhook arrived, so Afrikart
+                // has credited the wallet back. Record when so reconciliation
+                // can match this against the balance log without manual lookup.
+                walletCreditAt: new Date(),
+              }
+            : {}),
+        },
+        $push: {
+          timeline: {
+            at: new Date(),
+            from: allowedFrom[0], // processing or uncertain — both are valid prior states
+            to: targetStatus,
+            actor: 'webhook',
+            detail: data,
+          },
+        },
+      },
+      { new: true },
+    );
+
+    if (!updated) {
       this.logger.warn(
-        `Payout ${customerReference}: ignoring ${targetStatus} webhook from ${payout.status}`,
+        `Payout ${customerReference}: ignoring ${targetStatus} webhook — already in terminal state`,
       );
       return;
     }
-
-    await this.transition(payout, targetStatus, 'webhook', {
-      fincraData: data,
-      reason: status === 'failed' ? (data.reason as string ?? 'Payout failed') : undefined,
-    });
 
     if (targetStatus === 'failed') {
       this.logger.warn(
-        `Payout ${customerReference} failed — Fincra has restored the wallet balance`,
+        `Payout ${customerReference} failed — provider has restored the wallet balance`,
       );
+    } else {
+      this.logger.log(`Payout ${customerReference} → ${targetStatus}`);
     }
   }
 
-  // ─── Uncertainty check ───────────────────────────────────────────────────
-  // Scheduled after submission; fires when no webhook has arrived within the threshold.
-  private scheduleUncertaintyCheck(payoutId: string) {
-    setTimeout(async () => {
-      const payout = await this.payoutModel.findById(payoutId);
-      if (!payout || payout.status !== 'processing') return;
+  // Finds every payout that has been PROCESSING longer than the threshold and
+  // atomically moves each one to UNCERTAIN. The findOneAndUpdate filter includes
+  // `status: 'processing'` so a concurrent webhook that already settled the
+  // payout will cause the update to match nothing — no backward movement.
+  async recoverUncertainPayouts() {
+    const cutoff = new Date(Date.now() - this.uncertaintyThresholdMs);
+    const stale: any[] = await this.payoutModel
+      .find({ status: 'processing', submittedToProviderAt: { $lt: cutoff } })
+      .lean();
 
-      this.logger.warn(
-        `Payout ${payout.customerReference} still PROCESSING after ${this.uncertaintyThresholdMs}ms — marking UNCERTAIN`,
-      );
-      await this.transition(payout, 'uncertain', 'system', {
-        reason: `No webhook received within ${this.uncertaintyThresholdMs}ms threshold`,
-        thresholdMs: this.uncertaintyThresholdMs,
-      });
-    }, this.uncertaintyThresholdMs);
+    await Promise.all(
+      stale.map(async (p) => {
+        const updated = await this.payoutModel.findOneAndUpdate(
+          { _id: p._id, status: 'processing' },
+          {
+            $set: { status: 'uncertain' },
+            $push: {
+              timeline: {
+                at: new Date(),
+                from: 'processing',
+                to: 'uncertain',
+                actor: 'system',
+                detail: {
+                  reason: 'No webhook received within threshold',
+                  thresholdMs: this.uncertaintyThresholdMs,
+                },
+              },
+            },
+          },
+          { new: true },
+        );
+        if (updated) {
+          this.logger.warn(`Recovered uncertain payout: ${p.customerReference}`);
+        }
+      }),
+    );
   }
 
-  // ─── State machine transition ─────────────────────────────────────────────
+  // ─── State machine transition (used inside createPayout only) ────────────
+  // createPayout is sequential — no concurrent writes during the creation
+  // flow — so a simple findByIdAndUpdate is safe here.
   private async transition(
     payout: PayoutDocument,
     to: PayoutStatus,
@@ -265,9 +272,7 @@ export class PayoutsService {
 
     const update: any = {
       $set: { status: to },
-      $push: {
-        timeline: { at: new Date(), from, to, actor, detail },
-      },
+      $push: { timeline: { at: new Date(), from, to, actor, detail } },
     };
 
     if (to === 'failed' && detail.reason) {
@@ -277,15 +282,69 @@ export class PayoutsService {
     return this.payoutModel.findByIdAndUpdate(payout._id, update, { new: true });
   }
 
-  // ─── Queries ──────────────────────────────────────────────────────────────
-  async getByCustomerRef(customerReference: string): Promise<PayoutDocument> {
-    const p = await this.payoutModel.findOne({ customerReference });
-    if (!p) throw new NotFoundException(`Payout ${customerReference} not found`);
-    return p;
-  }
+  private async submitToProvider(payout: PayoutDocument, dto: CreatePayoutDto) {
+    try {
+      const res: any = await this.afrikart.createPayout(
+        {
+          amount: dto.amount,
+          sourceCurrency: dto.sourceCurrency ?? 'NGN',
+          destinationCurrency: dto.destinationCurrency ?? dto.sourceCurrency ?? 'NGN',
+          customerReference: dto.customerReference,
+          narration: dto.narration ?? 'Afrikart payout',
+          quoteReference: dto.quoteReference,
+          recipient: dto.recipient,
+        },
+        payout.customerReference,
+      );
 
-  async list(status?: string): Promise<any[]> {
-    const filter = status ? { status } : {};
-    return this.payoutModel.find(filter).sort({ createdAt: -1 }).lean();
+      const payoutData = res?.data ?? res;
+      await this.payoutModel.findByIdAndUpdate(payout._id, {
+        $set: {
+          providerPayoutReference: payoutData?.reference ?? null,
+          providerPayoutId: payoutData?.id ?? null,
+          fee: payoutData?.fee ?? null,
+          rate: payoutData?.rate ?? null,
+          submittedToProviderAt: new Date(), // recovery scan uses this timestamp
+        },
+        $push: {
+          timeline: {
+            at: new Date(),
+            from: 'processing',
+            to: 'processing',
+            actor: 'system',
+            detail: {
+              note: 'Submitted to provider',
+              provider: payout.provider,
+              providerRef: payoutData?.reference,
+              providerId: payoutData?.id,
+            },
+          },
+        },
+        $inc: { attemptCount: 1 },
+      });
+    } catch (err) {
+      // Submission failed — payout stays PROCESSING. If the request actually
+      // reached the provider, their webhook will settle it. If not, the
+      // uncertainty recovery scan will mark it UNCERTAIN after the threshold.
+      this.logger.error(
+        `Payout submission failed for ${payout.customerReference}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      await this.payoutModel.findByIdAndUpdate(payout._id, {
+        $set: { submittedToProviderAt: new Date() },
+        $push: {
+          timeline: {
+            at: new Date(),
+            from: 'processing',
+            to: 'processing',
+            actor: 'system',
+            detail: {
+              note: 'Provider submission error — recovery scan will mark UNCERTAIN if no webhook arrives',
+              error: err instanceof Error ? err.message : String(err),
+            },
+          },
+        },
+        $inc: { attemptCount: 1 },
+      });
+    }
   }
 }

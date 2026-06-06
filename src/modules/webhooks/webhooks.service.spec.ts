@@ -1,3 +1,4 @@
+/// <reference types="jest" />
 import { Test } from '@nestjs/testing';
 import { getModelToken } from '@nestjs/mongoose';
 import { ConfigService } from '@nestjs/config';
@@ -17,15 +18,16 @@ function makeSignature(payload: object): string {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function makeProcessedModel(savedIds: Set<string>) {
+function makeProcessedModel(savedIds: Set<string>, stored: Map<string, any> = new Map()) {
   return {
-    create: jest.fn(async (doc: { fincraEventId: string }) => {
-      if (savedIds.has(doc.fincraEventId)) {
+    create: jest.fn(async (doc: { eventId: string; externalPaymentId?: string | null }) => {
+      if (savedIds.has(doc.eventId)) {
         const err: any = new Error('duplicate key');
         err.code = 11000;
         throw err;
       }
-      savedIds.add(doc.fincraEventId);
+      savedIds.add(doc.eventId);
+      stored.set(doc.eventId, doc);
       return doc;
     }),
   };
@@ -49,7 +51,7 @@ async function buildService(overrides: {
         provide: ConfigService,
         useValue: {
           get: (key: string) => {
-            if (key === 'fincra.webhookSecret') return WEBHOOK_SECRET;
+            if (key === 'afrikart.webhookSecret') return WEBHOOK_SECRET;
           },
         },
       },
@@ -93,6 +95,48 @@ describe('WebhooksService.verifySignature', () => {
     const sig = makeSignature(original); // signed over original
     const raw = Buffer.from(JSON.stringify(tampered)); // body was changed
     expect(svc.verifySignature(raw, sig)).toBe(false);
+  });
+});
+
+// ─── Test: externalPaymentId stored in processed_webhooks ────────────────────
+
+describe('WebhooksService.handleEvent — externalPaymentId audit link', () => {
+  it('stores data.id as externalPaymentId so processed_webhooks joins to Transaction', async () => {
+    const savedIds = new Set<string>();
+    const stored = new Map<string, any>();
+
+    const svc = await buildService({
+      processedModel: makeProcessedModel(savedIds, stored),
+      collectionsService: { applyCollectionWebhook: jest.fn().mockResolvedValue(undefined) },
+    });
+
+    const paymentId = 'txn_abc123';
+    const data = { reference: 'ord_xyz', id: paymentId };
+
+    await svc.handleEvent(paymentId, 'collection.successful', data);
+
+    const record = stored.get(paymentId);
+    expect(record).toBeDefined();
+    expect(record.externalPaymentId).toBe(paymentId);
+  });
+
+  it('stores null externalPaymentId when data.id is absent', async () => {
+    const savedIds = new Set<string>();
+    const stored = new Map<string, any>();
+
+    const svc = await buildService({
+      processedModel: makeProcessedModel(savedIds, stored),
+      collectionsService: { applyCollectionWebhook: jest.fn().mockResolvedValue(undefined) },
+    });
+
+    const data = { reference: 'ord_no_id' };
+    const eventId = 'collection.successful:ord_no_id';
+
+    await svc.handleEvent(eventId, 'collection.successful', data);
+
+    const record = stored.get(eventId);
+    expect(record).toBeDefined();
+    expect(record.externalPaymentId).toBeNull();
   });
 });
 
