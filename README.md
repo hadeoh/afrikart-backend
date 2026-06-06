@@ -77,10 +77,10 @@ Modules:
 
 | Module | Responsibility |
 |---|---|
-| `FincraModule` | HTTP client wrapper for all sandbox endpoints; handles chaos-mode retries |
+| `AfrikartModule` | HTTP client wrapper for all sandbox endpoints; handles chaos-mode retries |
 | `CollectionsModule` | Checkout initiation, Transaction schema, collection webhook handler |
 | `WebhooksModule` | HMAC-SHA512 signature verification, idempotency guard, event routing |
-| `PayoutsModule` | Account verification, payout state machine, Fincra submission |
+| `PayoutsModule` | Account verification, payout state machine, Afrikart submission |
 | `TimelineModule` | Operator-facing chronological lifecycle views |
 
 ---

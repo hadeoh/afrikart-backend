@@ -49,12 +49,12 @@ export class Payout {
   @Prop({ default: null })
   sourceTransactionRef: string;
 
-  // ─── Fincra identifiers (populated after successful API call) ─────────────
+  // ─── Provider identifiers (populated after successful API call) ──────────
   @Prop({ default: null })
-  fincraPayoutReference: string; // payout.reference returned by Fincra
+  providerPayoutReference: string; // payout.reference returned by provider
 
   @Prop({ default: null })
-  fincraPayoutId: string; // payout.id (po_...) — links to balance-log debits
+  providerPayoutId: string; // payout.id (po_...) — links to balance-log debits
 
   // ─── Financials ──────────────────────────────────────────────────────────
   @Prop({ required: true })

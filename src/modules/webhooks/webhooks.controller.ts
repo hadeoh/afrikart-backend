@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { RawBodyRequest } from '@nestjs/common';
 import { Request } from 'express';
+import { createHash } from 'crypto';
 import { WebhooksService } from './webhooks.service';
 
 @Controller('webhooks')
@@ -56,13 +57,14 @@ export class WebhooksController {
     }
 
     // 3. Event ID comes from the sandbox's event log entry id.
-    // The sandbox includes it as data.id on some events; for others we fall
-    // back to a content-hash so we still get idempotency even without an id.
+    // Fallback: SHA-256 of the raw body — deterministic for the same payload,
+    // so a replay of an event with no id still deduplicates correctly.
+    // Date.now() would be non-deterministic and let duplicates through.
     const fincraEventId =
       (data.id as string) ??
       (data.reference as string
         ? `${event}:${data.reference}`
-        : `${event}:${Date.now()}`);
+        : `sha256:${createHash('sha256').update(rawBody).digest('hex').slice(0, 32)}`);
 
     // 4. Idempotency + dispatch
     const result = await this.service.handleEvent(fincraEventId, event, data);

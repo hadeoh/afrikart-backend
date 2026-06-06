@@ -57,7 +57,7 @@ export class CollectionsService {
           detail: {
             amount: dto.amount,
             currency: dto.currency ?? 'NGN',
-            fincraPaymentId: payment.id ?? null,
+            externalPaymentId: payment.id ?? null,
           },
         },
       ],

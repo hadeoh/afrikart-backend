@@ -149,8 +149,8 @@ export class PayoutsService {
       const payoutData = res?.data ?? res;
       await this.payoutModel.findByIdAndUpdate(payout._id, {
         $set: {
-          fincraPayoutReference: payoutData?.reference ?? null,
-          fincraPayoutId: payoutData?.id ?? null,
+          providerPayoutReference: payoutData?.reference ?? null,
+          providerPayoutId: payoutData?.id ?? null,
           fee: payoutData?.fee ?? null,
           rate: payoutData?.rate ?? null,
         },
@@ -161,9 +161,9 @@ export class PayoutsService {
             to: 'processing',
             actor: 'system',
             detail: {
-              note: 'Submitted to Fincra',
-              fincraRef: payoutData?.reference,
-              fincraId: payoutData?.id,
+              note: 'Submitted to provider',
+              providerRef: payoutData?.reference,
+              providerId: payoutData?.id,
             },
           },
         },
@@ -175,7 +175,7 @@ export class PayoutsService {
       // if it went through. If it didn't, the webhook never arrives and the
       // uncertainty timer fires.
       this.logger.error(
-        `Fincra payout submission failed for ${payout.customerReference}: ${err instanceof Error ? err.message : String(err)}`,
+        `Payout submission failed for ${payout.customerReference}: ${err instanceof Error ? err.message : String(err)}`,
       );
       await this.payoutModel.findByIdAndUpdate(payout._id, {
         $push: {
@@ -185,7 +185,7 @@ export class PayoutsService {
             to: 'processing',
             actor: 'system',
             detail: {
-              note: 'Fincra submission error — webhook will confirm or uncertainty timer will fire',
+              note: 'Provider submission error — webhook will confirm or uncertainty timer will fire',
               error: err instanceof Error ? err.message : String(err),
             },
           },

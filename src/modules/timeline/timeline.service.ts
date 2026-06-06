@@ -41,7 +41,7 @@ export class TimelineService {
     return {
       transaction: {
         internalRef: txn.internalRef,
-        fincraPaymentId: txn.externalPaymentId,
+        externalPaymentId: txn.externalPaymentId,
         amount: txn.amount,
         currency: txn.currency,
         customer: txn.customer,
@@ -50,7 +50,7 @@ export class TimelineService {
       },
       payouts: payouts.map((p) => ({
         customerReference: p.customerReference,
-        fincraPayoutReference: p.fincraPayoutReference,
+        providerPayoutReference: p.providerPayoutReference,
         amount: p.amount,
         status: p.status,
         failureReason: p.failureReason,
@@ -68,8 +68,8 @@ export class TimelineService {
     return {
       payout: {
         customerReference: payout.customerReference,
-        fincraPayoutReference: payout.fincraPayoutReference,
-        fincraPayoutId: payout.fincraPayoutId,
+        providerPayoutReference: payout.providerPayoutReference,
+        providerPayoutId: payout.providerPayoutId,
         amount: payout.amount,
         status: payout.status,
         failureReason: payout.failureReason,
